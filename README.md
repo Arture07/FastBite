@@ -4,8 +4,6 @@
 
 Bem-vindo ao FastBite! Este é um aplicativo de delivery de comida desenvolvido em Flutter, com o objetivo de fornecer uma plataforma completa tanto para clientes que desejam pedir comida quanto para restaurantes que querem gerenciar seus cardápios e pedidos. O projeto utiliza Firebase como backend para autenticação, banco de dados (Cloud Firestore) e armazenamento de imagens (Firebase Storage).
 
-##  Screenshots (Exemplos)
-
 ## Funcionalidades Implementadas
 
 O aplicativo é dividido em duas interfaces principais: Cliente e Restaurante.
