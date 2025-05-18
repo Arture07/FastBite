@@ -113,7 +113,7 @@ O aplicativo é dividido em duas interfaces principais: Cliente e Restaurante.
 
 2.  **Clonar o Repositório:**
     ```bash
-    git clone [https://github.com/SEU_USUARIO/SEU_REPOSITORIO.git](https://github.com/SEU_USUARIO/SEU_REPOSITORIO.git)
+    git clone git clone https://github.com/Arture07/FastBite.git
     cd SEU_REPOSITORIO
     ```
 
