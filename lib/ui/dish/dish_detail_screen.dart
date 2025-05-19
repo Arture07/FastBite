@@ -1,7 +1,10 @@
+// lib/ui/dish/dish_detail_screen.dart
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:myapp/model/dish.dart';
-import 'package:myapp/model/review.dart'; // <<< IMPORTAR REVIEW MODEL
+import 'package:myapp/model/review.dart';
+import 'package:myapp/services/error_handler.dart';
 import 'package:myapp/ui/_core/bag_provider.dart';
 import 'package:myapp/ui/_core/favorites_provider.dart';
 import 'package:myapp/ui/_core/widgets/appbar.dart';
@@ -9,8 +12,9 @@ import 'package:provider/provider.dart';
 import 'package:flutter_rating_bar/flutter_rating_bar.dart';
 import 'package:myapp/data/restaurant_data.dart';
 import 'package:myapp/ui/_core/auth_provider.dart';
+import 'package:cached_network_image/cached_network_image.dart';
 
-class DishDetailScreen extends StatefulWidget { // <<< ALTERADO PARA STATEFULWIDGET
+class DishDetailScreen extends StatefulWidget {
   final Dish dish;
   final String restaurantId;
 
@@ -24,7 +28,7 @@ class DishDetailScreen extends StatefulWidget { // <<< ALTERADO PARA STATEFULWID
   State<DishDetailScreen> createState() => _DishDetailScreenState();
 }
 
-class _DishDetailScreenState extends State<DishDetailScreen> { // <<< CLASSE STATE CRIADA
+class _DishDetailScreenState extends State<DishDetailScreen> {
   List<Review> _dishReviews = [];
   bool _isLoadingReviews = false;
   final TextEditingController _dishCommentController = TextEditingController();
@@ -63,49 +67,37 @@ class _DishDetailScreenState extends State<DishDetailScreen> { // <<< CLASSE STA
     } catch (e) {
       if (mounted) {
         setState(() => _isLoadingReviews = false);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text("Erro ao carregar avaliações do prato: ${e.toString()}")),
-        );
+        ErrorHandler.handleGenericError(context, e, operation: "carregar avaliações do prato");
       }
     }
   }
 
-  Future<void> _showDishRatingReviewDialog(BuildContext context, Dish currentDish, String currentRestaurantId) async {
-    final authProvider = Provider.of<AuthProvider>(context, listen: false);
-    final restaurantDataProvider = Provider.of<RestaurantData>(context, listen: false);
+  Future<void> _showDishRatingReviewDialog(BuildContext screenContext, Dish currentDish) async {
+    final authProvider = Provider.of<AuthProvider>(screenContext, listen: false);
+    final restaurantDataProvider = Provider.of<RestaurantData>(screenContext, listen: false);
 
     if (!authProvider.isAuthenticated || authProvider.currentUser == null) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("Você precisa estar logado para avaliar pratos.")),
-      );
+      if (!screenContext.mounted) return;
+      ErrorHandler.handleGenericError(screenContext, "Você precisa estar logado para avaliar pratos.");
       return;
     }
     final String userId = authProvider.currentUser!.id;
     final String userName = authProvider.currentUser!.name;
-    double userDishRating = 3.0;
+    final String? userImagePath = authProvider.currentUser!.userImagePath;
+    double userDishRating = 3.0; 
     _dishCommentController.clear();
 
-    // Opcional: Buscar avaliação/comentário anterior do utilizador para este prato
-    // try {
-    //   final existingReview = await restaurantDataProvider.getDishReviews(currentRestaurantId, currentDish.id, limit: 100)
-    //       .then((reviews) => reviews.firstWhere((r) => r.userId == userId, orElse: () => Review(id: '', userId: '', userName: '', rating: 0, timestamp: DateTime.now())));
-    //   if (existingReview.id.isNotEmpty && existingReview.rating > 0) {
-    //     userDishRating = existingReview.rating;
-    //     _dishCommentController.text = existingReview.comment ?? '';
-    //   }
-    // } catch (e) {
-    //   debugPrint("Nenhuma avaliação anterior encontrada para o utilizador $userId no prato ${currentDish.id}");
-    // }
-
+    final navigator = Navigator.of(screenContext); 
+    final scaffoldMessenger = ScaffoldMessenger.of(screenContext);
 
     return showDialog<void>(
-      context: context,
-      builder: (BuildContext dialogContext) {
+      context: screenContext, 
+      builder: (BuildContext dialogContext) { 
         double currentDialogRating = userDishRating;
+        
         return AlertDialog(
           title: Text('Avaliar "${currentDish.name}"'),
-          content: StatefulBuilder(
+          content: StatefulBuilder( 
             builder: (context, setDialogState){
               return SingleChildScrollView(
                 child: Column(
@@ -146,38 +138,56 @@ class _DishDetailScreenState extends State<DishDetailScreen> { // <<< CLASSE STA
           actions: <Widget>[
             TextButton(
               child: const Text('Cancelar'),
-              onPressed: () => Navigator.of(dialogContext).pop(),
+              onPressed: () {
+                // Usa o navigator do diálogo para fechar o diálogo
+                if (dialogContext.mounted) Navigator.of(dialogContext).pop();
+              }
             ),
             ElevatedButton(
               child: const Text('Enviar'),
               onPressed: () async {
-                if (currentDialogRating > 0) {
+                if (currentDialogRating >= 1) { 
+                  bool success = false;
+                  String? errorMessage; // Alterado para String?
                   try {
                     await restaurantDataProvider.submitDishReview(
-                          restaurantId: currentRestaurantId,
+                          restaurantId: widget.restaurantId, 
                           dishId: currentDish.id,
                           userId: userId,
                           userName: userName,
+                          userImagePath: userImagePath,
                           rating: currentDialogRating,
-                          comment: _dishCommentController.text.trim().isNotEmpty ? _dishCommentController.text.trim() : null,
+                          comment: _dishCommentController.text.trim().isNotEmpty 
+                                   ? _dishCommentController.text.trim() 
+                                   : null, 
                         );
-                    if (!mounted) return;
-                    Navigator.of(dialogContext).pop();
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(content: Text('Avaliação do prato enviada!')),
-                    );
-                    _loadDishReviews(); // Recarrega reviews do prato
+                    success = true;
                   } catch (e) {
-                    if (!mounted) return;
-                    Navigator.of(dialogContext).pop();
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(content: Text('Erro ao avaliar prato: ${e.toString().replaceFirst("Exception: ", "")}')),
-                    );
+                    errorMessage = e.toString().replaceFirst("Exception: ", "");
+                  }
+
+                  // Fecha o diálogo usando o contexto do diálogo, se ainda estiver montado
+                  if (dialogContext.mounted) {
+                     Navigator.of(dialogContext).pop();
+                  }
+
+                  // Mostra SnackBar usando o contexto da tela principal (screenContext), se montado
+                  if (screenContext.mounted) {
+                    if (success) {
+                       scaffoldMessenger.showSnackBar(
+                         const SnackBar(content: Text('Avaliação do prato enviada!'), backgroundColor: Colors.green),
+                       );
+                       _loadDishReviews(); 
+                    } else {
+                        ErrorHandler.handleGenericError(screenContext, errorMessage ?? "Erro ao enviar avaliação do prato.");
+                    }
                   }
                 } else {
-                   ScaffoldMessenger.of(dialogContext).showSnackBar(
-                      const SnackBar(content: Text('Por favor, selecione uma nota em estrelas.')),
-                    );
+                   if (dialogContext.mounted) { 
+                      ScaffoldMessenger.of(dialogContext).showSnackBar(
+                        const SnackBar(content: Text('Por favor, selecione uma nota em estrelas.')),
+                      );
+                   }
                 }
               },
             ),
@@ -190,24 +200,23 @@ class _DishDetailScreenState extends State<DishDetailScreen> { // <<< CLASSE STA
   @override
   Widget build(BuildContext context) {
     final favoritesProvider = context.watch<FavoritesProvider>();
-    // Usa widget.dish para o prato inicial, mas currentDisplayDish para o prato atualizado do provider
-    final bool isFavorite = favoritesProvider.isDishFavorite(widget.dish.id);
     final currencyFormat = NumberFormat.currency(locale: 'pt_BR', symbol: 'R\$');
     final theme = Theme.of(context);
     final numberFormat = NumberFormat.compact(locale: 'pt_BR');
 
-    // Ouve o RestaurantData para obter a versão mais atualizada do prato
-    final Dish currentDisplayDish = context.select<RestaurantData, Dish>(
-      (data) {
-        try {
-          final restaurant = data.listRestaurant.firstWhere((r) => r.id == widget.restaurantId);
-          return restaurant.dishes.firstWhere((d) => d.id == widget.dish.id);
-        } catch (e) {
-          debugPrint("DishDetailScreen: Prato ${widget.dish.id} não encontrado no provider, usando dados iniciais. Erro: $e");
-          return widget.dish; 
-        }
-      }
-    );
+    // <<< USA context.watch para reatividade >>>
+    final restaurantData = context.watch<RestaurantData>();
+    Dish currentDisplayDish;
+    try {
+      final restaurant = restaurantData.listRestaurant.firstWhere((r) => r.id == widget.restaurantId);
+      currentDisplayDish = restaurant.dishes.firstWhere((d) => d.id == widget.dish.id);
+    } catch (e) {
+      // Se não encontrar (ex: lista ainda a carregar ou ID inválido), usa o prato original passado para o widget
+      currentDisplayDish = widget.dish; 
+      debugPrint("DishDetailScreen: Prato ${widget.dish.id} não encontrado no provider, usando dados iniciais do widget. Erro: $e");
+    }
+    final bool isFavorite = favoritesProvider.isDishFavorite(currentDisplayDish.id);
+
 
     return Scaffold(
       appBar: getAppBar(
@@ -225,12 +234,18 @@ class _DishDetailScreenState extends State<DishDetailScreen> { // <<< CLASSE STA
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            // Imagem do Prato
             Image.asset(
               'assets/${currentDisplayDish.imagePath}',
               width: double.infinity,
               height: MediaQuery.of(context).size.height * 0.3,
               fit: BoxFit.cover,
-              errorBuilder: (context, error, stackTrace) => Container( /* ... */ ),
+              errorBuilder: (context, error, stackTrace) => Container(
+                 width: double.infinity,
+                 height: MediaQuery.of(context).size.height * 0.3,
+                 color: Colors.grey[800],
+                 child: Center(child: Icon(Icons.fastfood_outlined, color: Colors.grey[600], size: 60)),
+              ),
             ),
             Padding(
               padding: const EdgeInsets.all(16.0),
@@ -239,7 +254,7 @@ class _DishDetailScreenState extends State<DishDetailScreen> { // <<< CLASSE STA
                 children: [
                   Text(currentDisplayDish.name, style: theme.textTheme.headlineMedium?.copyWith(fontWeight: FontWeight.bold)),
                   const SizedBox(height: 8),
-                  Row( // Linha para avaliação do PRATO
+                  Row(
                     children: [
                       if (currentDisplayDish.ratingCount > 0) ...[
                         RatingBarIndicator(
@@ -261,7 +276,7 @@ class _DishDetailScreenState extends State<DishDetailScreen> { // <<< CLASSE STA
                         icon: const Icon(Icons.rate_review_outlined, size: 18),
                         label: const Text('Avaliar Prato'),
                         onPressed: () {
-                           _showDishRatingReviewDialog(context, currentDisplayDish, widget.restaurantId);
+                           _showDishRatingReviewDialog(context, currentDisplayDish);
                         },
                       )
                     ],
@@ -276,10 +291,17 @@ class _DishDetailScreenState extends State<DishDetailScreen> { // <<< CLASSE STA
                   const SizedBox(height: 8),
                   Text(currentDisplayDish.description, style: theme.textTheme.bodyLarge?.copyWith(height: 1.5)),
                   const SizedBox(height: 16),
-                  if (currentDisplayDish.categories.isNotEmpty) ...[ /* ... Categorias ... */ ],
+                  if (currentDisplayDish.categories.isNotEmpty) ...[
+                     Text("Categorias", style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold)),
+                     const SizedBox(height: 8),
+                     Wrap(
+                       spacing: 8.0,
+                       runSpacing: 4.0,
+                       children: currentDisplayDish.categories.map((category) => Chip(label: Text(category))).toList(),
+                     ),
+                  ],
                   const SizedBox(height: 24),
 
-                  // <<< NOVA SEÇÃO PARA EXIBIR REVIEWS DO PRATO >>>
                   Text("Avaliações do Prato", style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold)),
                   const SizedBox(height: 8.0),
                   _isLoadingReviews
@@ -296,13 +318,42 @@ class _DishDetailScreenState extends State<DishDetailScreen> { // <<< CLASSE STA
                             itemBuilder: (context, index) {
                               final review = _dishReviews[index];
                               return Card(
+                                elevation: 1,
                                 margin: const EdgeInsets.symmetric(vertical: 6.0),
                                 child: Padding(
                                   padding: const EdgeInsets.all(12.0),
                                   child: Column(
                                     crossAxisAlignment: CrossAxisAlignment.start,
                                     children: [
-                                      Row( /* ... Nome, Estrelas, Data da Review ... */ ),
+                                      Row(
+                                        children: [
+                                          CircleAvatar(
+                                            backgroundColor: theme.colorScheme.secondaryContainer,
+                                            backgroundImage: review.userImagePath != null && review.userImagePath!.startsWith('http')
+                                                ? CachedNetworkImageProvider(review.userImagePath!)
+                                                : null,
+                                            child: (review.userImagePath == null || review.userImagePath!.isEmpty || !review.userImagePath!.startsWith('http'))
+                                                ? Text(review.userName.isNotEmpty ? review.userName[0].toUpperCase() : "?", style: TextStyle(color: theme.colorScheme.onSecondaryContainer))
+                                                : null,
+                                          ),
+                                          const SizedBox(width: 10),
+                                          Expanded(
+                                            child: Column(
+                                              crossAxisAlignment: CrossAxisAlignment.start,
+                                              children: [
+                                                Text(review.userName, style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.bold)),
+                                                RatingBarIndicator(
+                                                  rating: review.rating,
+                                                  itemBuilder: (context, _) => const Icon(Icons.star, color: Colors.amber),
+                                                  itemCount: 5,
+                                                  itemSize: 16.0,
+                                                ),
+                                              ],
+                                            ),
+                                          ),
+                                          Text(DateFormat('dd/MM/yy').format(review.timestamp), style: theme.textTheme.bodySmall),
+                                        ],
+                                      ),
                                       if (review.comment != null && review.comment!.isNotEmpty) ...[
                                         const SizedBox(height: 8.0),
                                         Text(review.comment!, style: theme.textTheme.bodyMedium, textAlign: TextAlign.justify,),
@@ -323,7 +374,7 @@ class _DishDetailScreenState extends State<DishDetailScreen> { // <<< CLASSE STA
         padding: const EdgeInsets.all(16.0),
         decoration: BoxDecoration(
           color: theme.scaffoldBackgroundColor,
-          boxShadow: [ BoxShadow(color: Colors.black.withAlpha(30), blurRadius: 4, offset: const Offset(0, -2)) ],
+          boxShadow: [ BoxShadow(color: Colors.black.withAlpha((255 * 0.1).round()), blurRadius: 4, offset: const Offset(0, -2)) ],
         ),
         child: ElevatedButton.icon(
           icon: const Icon(Icons.add_shopping_cart),
@@ -335,7 +386,7 @@ class _DishDetailScreenState extends State<DishDetailScreen> { // <<< CLASSE STA
             foregroundColor: theme.colorScheme.onPrimary,
           ),
           onPressed: () {
-            context.read<BagProvider>().addAllDishes([currentDisplayDish], widget.restaurantId);
+            context.read<BagProvider>().addAllDishes([currentDisplayDish], widget.restaurantId); // <<< USA widget.restaurantId
             ScaffoldMessenger.of(context).showSnackBar(
               SnackBar(
                 content: Text('${currentDisplayDish.name} adicionado à sacola!'),

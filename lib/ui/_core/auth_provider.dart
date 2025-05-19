@@ -3,27 +3,25 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 import 'package:myapp/model/user.dart';
-import 'package:myapp/model/restaurant.dart';
-import 'package:myapp/data/restaurant_data.dart';
-import 'package:provider/provider.dart';
+import 'package:myapp/model/restaurant.dart'; // Para o registo de restaurante
+import 'package:myapp/data/restaurant_data.dart'; // Para o registo de restaurante
+import 'package:provider/provider.dart'; // Para context.read em registerWithEmailAndPassword
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart' as fb_auth;
+import 'package:myapp/services/image_upload_service.dart'; // Para deletar imagem do storage ao excluir conta
 
-/// Gerencia o estado de autenticação usando Firebase Authentication
-/// e os dados do utilizador armazenados no Cloud Firestore.
 class AuthProvider extends ChangeNotifier {
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
   final fb_auth.FirebaseAuth _firebaseAuth = fb_auth.FirebaseAuth.instance;
+  final ImageUploadService _imageUploadService = ImageUploadService();
 
-  User? _currentUserData; // Dados do Firestore
-  fb_auth.User? _firebaseUser; // Utilizador do Firebase Auth
-  bool _isLoading = true; // Estado de carregamento inicial
+  User? _currentUserData;
+  fb_auth.User? _firebaseUser;
+  bool _isLoading = true;
   StreamSubscription<fb_auth.User?>? _authStateSubscription;
 
-  // Getters públicos
   User? get currentUser => _currentUserData;
   fb_auth.User? get firebaseUser => _firebaseUser;
-  // A fonte da verdade para autenticação é se temos um _firebaseUser
   bool get isAuthenticated => _firebaseUser != null;
   bool get isLoading => _isLoading;
 
@@ -31,7 +29,7 @@ class AuthProvider extends ChangeNotifier {
     debugPrint("AuthProvider (FirebaseAuth): Inicializando e ouvindo estado...");
     _authStateSubscription = _firebaseAuth.authStateChanges().listen(_onAuthStateChanged, onError: (error) {
        debugPrint("AuthProvider: Erro no stream authStateChanges: $error");
-       _handleAuthError(); // Trata erro no stream
+       _handleAuthError();
     });
   }
 
@@ -42,9 +40,133 @@ class AuthProvider extends ChangeNotifier {
     super.dispose();
   }
 
+  Future<void> _onAuthStateChanged(fb_auth.User? user) async {
+    bool needsNotifyForLoading = _isLoading;
+    _isLoading = true; 
+    if (!needsNotifyForLoading &&_firebaseUser != user) notifyListeners();
+
+    _firebaseUser = user;
+
+    if (user == null) {
+      _currentUserData = null;
+      debugPrint("AuthProvider: Utilizador deslogado.");
+    } else {
+      try {
+        debugPrint("AuthProvider: Utilizador ${user.uid} logado. Buscando dados Firestore...");
+        DocumentSnapshot userDoc = await _firestore.collection('users').doc(user.uid).get();
+        if (userDoc.exists && userDoc.data() != null) {
+          Map<String, dynamic> userDataMap = userDoc.data() as Map<String, dynamic>;
+          userDataMap['id'] = user.uid; 
+          _currentUserData = User.fromJson(userDataMap);
+          debugPrint("AuthProvider: Dados Firestore carregados para ${_currentUserData?.name}");
+        } else {
+          debugPrint("AuthProvider: ERRO! Utilizador ${user.uid} autenticado mas sem dados no Firestore. Forçando logout.");
+          await _forceLogout();
+          return;
+        }
+      } catch (e, s) {
+        debugPrint("AuthProvider: Erro ao buscar dados Firestore para ${user.uid}: $e\n$s");
+        await _forceLogout();
+        return;
+      }
+    }
+    _isLoading = false;
+    notifyListeners();
+     debugPrint("AuthProvider: _onAuthStateChanged concluído. Autenticado: $isAuthenticated, Utilizador: ${_currentUserData?.name}");
+  }
+
+  void _handleAuthError() {
+     _firebaseUser = null;
+     _currentUserData = null;
+     if (_isLoading) {
+        _isLoading = false;
+        notifyListeners();
+     } else if (isAuthenticated) { 
+        notifyListeners();
+     }
+  }
+
+  Future<void> _forceLogout() async {
+     try { await _firebaseAuth.signOut(); } catch (_) {}
+     _firebaseUser = null; _currentUserData = null;
+  }
+
+  Future<void> registerWithEmailAndPassword({
+    required BuildContext context, required String name, required String email,
+    required String password, required UserRole role,
+    String? restaurantName, String? restaurantDescription,
+  }) async {
+    if (_isLoading) return;
+    _setLoading(true);
+    final restaurantDataProvider = context.read<RestaurantData>();
+
+    try {
+      fb_auth.UserCredential userCredential = await _firebaseAuth.createUserWithEmailAndPassword(
+        email: email.trim(),
+        password: password.trim(),
+      );
+      final fb_auth.User firebaseUser = userCredential.user!;
+      final newUser = User(
+        id: firebaseUser.uid,
+        name: name.trim(),
+        email: firebaseUser.email!,
+        role: role,
+        userImagePath: null, 
+      );
+      await _firestore.collection('users').doc(newUser.id).set(newUser.toJson());
+
+      if (role == UserRole.restaurant) {
+        final newRestaurant = Restaurant(
+          id: newUser.id, imagePath: 'assets/restaurants/default.png', 
+          name: restaurantName?.trim() ?? 'Restaurante de ${newUser.name}',
+          description: restaurantDescription?.trim() ?? 'Descrição Padrão',
+          stars: 0.0, distance: 0, categories: [],
+          ratingCount: 0, ratingSum: 0.0, 
+        );
+        await restaurantDataProvider.addRestaurant(newRestaurant);
+      }
+    } on fb_auth.FirebaseAuthException catch (e) {
+      _setLoading(false);
+      _rethrowFirebaseAuthException(e, "registo");
+    } catch (e, s) {
+      _setLoading(false);
+      debugPrint("AuthProvider: Erro inesperado no registo: $e\n$s");
+      throw Exception('Ocorreu um erro inesperado durante o registo.');
+    }
+  }
+
+  Future<void> signInWithEmailAndPassword(String email, String password) async {
+    if (_isLoading) return;
+    _setLoading(true);
+    try {
+      await _firebaseAuth.signInWithEmailAndPassword(email: email.trim(), password: password.trim());
+    } on fb_auth.FirebaseAuthException catch (e) {
+      _setLoading(false);
+      _rethrowFirebaseAuthException(e, "login");
+    } catch (e, s) {
+      _setLoading(false);
+      debugPrint("AuthProvider: Erro inesperado no login: $e\n$s");
+      throw Exception('Ocorreu um erro inesperado durante o login.');
+    }
+  }
+
+  Future<void> logout() async {
+    debugPrint("AuthProvider: Método logout() chamado.");
+    bool wasLoading = _isLoading;
+    _isLoading = true;
+    if (!wasLoading) notifyListeners();
+
+    try {
+      await _firebaseAuth.signOut();
+    } catch (e, s) {
+       debugPrint("AuthProvider: Erro durante o signOut do Firebase: $e\n$s");
+       _handleAuthError();
+    }
+  }
+  
   Future<void> updateUserProfile({
     required String name,
-    String? photoURL, // URL da imagem do Firebase Storage
+    String? photoURL, 
   }) async {
     if (!isAuthenticated || _firebaseUser == null) {
       throw Exception("Utilizador não está autenticado para atualizar o perfil.");
@@ -53,224 +175,43 @@ class AuthProvider extends ChangeNotifier {
     _setLoading(true);
 
     try {
-      // 1. Atualiza o perfil no Firebase Authentication
       if (_firebaseUser!.displayName != name || (_firebaseUser!.photoURL != photoURL && photoURL != null)) {
         await _firebaseUser!.updateProfile(displayName: name, photoURL: photoURL);
-        // Recarrega o _firebaseUser para ter os dados mais recentes do Auth
         await _firebaseUser!.reload(); 
-        _firebaseUser = _firebaseAuth.currentUser; // Pega a instância atualizada
-        debugPrint("AuthProvider: Perfil no Firebase Auth atualizado.");
+        _firebaseUser = _firebaseAuth.currentUser; 
+        debugPrint("AuthProvider: Perfil no Firebase Auth atualizado (nome e/ou photoURL).");
       }
 
-      // 2. Atualiza os dados no Firestore na coleção 'users'
-      // Prepara os dados para atualização, apenas os que podem mudar
-      Map<String, dynamic> dataToUpdate = {
-        'name': name,
-      };
+      Map<String, dynamic> dataToUpdate = {'name': name};
       if (photoURL != null) {
-        // Supondo que seu modelo User tem um campo como 'userImagePath' ou similar
-        // Se o modelo User usa 'photoURL' diretamente, ajuste aqui.
         dataToUpdate['userImagePath'] = photoURL; 
+      } else if (_currentUserData?.userImagePath != null && photoURL == null) {
+        dataToUpdate['userImagePath'] = null;
       }
 
       await _firestore.collection('users').doc(_firebaseUser!.uid).update(dataToUpdate);
-      debugPrint("AuthProvider: Dados do utilizador no Firestore atualizados.");
+      debugPrint("AuthProvider: Dados do utilizador no Firestore atualizados: $dataToUpdate");
 
-      // 3. Atualiza o _currentUserData local para refletir na UI imediatamente
       if (_currentUserData != null) {
         _currentUserData = _currentUserData!.copyWith(
           name: name,
-          userImagePath: photoURL ?? _currentUserData!.userImagePath, // Mantém o antigo se o novo for nulo
+          userImagePath: photoURL ?? _currentUserData!.userImagePath,
         );
       }
-      _setLoading(false); // Notifica após todas as atualizações
-      // notifyListeners() já é chamado por _setLoading
+      _setLoading(false); 
 
     } on fb_auth.FirebaseAuthException catch (e) {
       _setLoading(false);
-      debugPrint("AuthProvider: Erro de FirebaseAuth ao atualizar perfil: ${e.code}");
-      if (e.code == 'requires-recent-login') {
-         throw Exception('Esta operação requer login recente. Por favor, faça logout e login novamente.');
-      }
-      throw Exception('Erro ao atualizar perfil no Auth: ${e.message}');
+      debugPrint("AuthProvider: Erro de FirebaseAuth ao atualizar perfil: ${e.code} - ${e.message}");
+      _rethrowFirebaseAuthException(e, "atualização de perfil no Auth");
     } catch (e, s) {
       _setLoading(false);
-      debugPrint("AuthProvider: Erro inesperado ao atualizar perfil: $e\n$s");
+      debugPrint("AuthProvider: Erro GERAL ao atualizar perfil (Firestore ou outro): $e\n$s");
       throw Exception('Ocorreu um erro inesperado ao atualizar seu perfil.');
     }
   }
 
-  /// Chamado quando o estado de autenticação do Firebase muda.
-  Future<void> _onAuthStateChanged(fb_auth.User? user) async {
-    debugPrint("AuthProvider: _onAuthStateChanged. Novo utilizador Firebase: ${user?.uid}");
-    _firebaseUser = user; // Atualiza utilizador do Auth
-
-    if (user == null) {
-      // Utilizador deslogou
-      _currentUserData = null;
-      // _isAuthenticated será false devido ao getter
-      debugPrint("AuthProvider: Utilizador deslogado.");
-    } else {
-      // Utilizador logou ou já estava logado, busca dados no Firestore
-      try {
-        debugPrint("AuthProvider: Utilizador ${user.uid} logado. Buscando dados Firestore...");
-        DocumentSnapshot userDoc = await _firestore.collection('users').doc(user.uid).get();
-        if (userDoc.exists && userDoc.data() != null) {
-          Map<String, dynamic> userDataMap = userDoc.data() as Map<String, dynamic>;
-          userDataMap['id'] = user.uid; // Garante ID correto
-          _currentUserData = User.fromJson(userDataMap);
-          debugPrint("AuthProvider: Dados Firestore carregados para ${_currentUserData?.name}");
-        } else {
-          debugPrint("AuthProvider: ERRO! Utilizador ${user.uid} autenticado mas sem dados no Firestore. Forçando logout.");
-          await logout(); // Força logout para evitar estado inconsistente
-          return; // Sai após logout
-        }
-      } catch (e, s) {
-        debugPrint("AuthProvider: Erro ao buscar dados Firestore para ${user.uid}: $e");
-        debugPrint("Stacktrace: $s");
-        await logout(); // Força logout em caso de erro
-        return; // Sai após logout
-      }
-    }
-
-    // Se estava em loading, marca como concluído
-    if (_isLoading) {
-       _isLoading = false;
-    }
-    notifyListeners(); // Notifica a UI sobre a mudança de estado
-  }
-
-  /// Lida com erros no stream de autenticação ou erros gerais de carregamento.
-  void _handleAuthError() {
-     _firebaseUser = null;
-     _currentUserData = null;
-     _isLoading = false;
-     notifyListeners();
-  }
-
-  /// Registra um novo utilizador com email e senha.
-  Future<void> registerWithEmailAndPassword({
-    required BuildContext context, // Necessário para ler RestaurantData
-    required String name,
-    required String email,
-    required String password,
-    required UserRole role,
-    String? restaurantName,
-    String? restaurantDescription,
-  }) async {
-    if (_isLoading) return;
-    _setLoading(true); // Usa helper para definir loading e notificar
-
-    try {
-      // 1. Cria utilizador no Firebase Auth
-      debugPrint("AuthProvider: Criando utilizador Auth para $email...");
-      fb_auth.UserCredential userCredential = await _firebaseAuth.createUserWithEmailAndPassword(
-        email: email.trim(),
-        password: password.trim(),
-      );
-      final fb_auth.User firebaseUser = userCredential.user!;
-      debugPrint("AuthProvider: Utilizador Auth ${firebaseUser.uid} criado.");
-
-      // 2. Cria objeto User local
-      final newUser = User(
-        id: firebaseUser.uid, // Usa UID real
-        name: name.trim(),
-        email: firebaseUser.email!,
-        role: role,
-      );
-
-      // 3. Salva dados no Firestore
-      debugPrint("AuthProvider: Salvando dados Firestore para ${newUser.id}...");
-      await _firestore.collection('users').doc(newUser.id).set(newUser.toJson());
-
-      // 4. Se for restaurante, cria no Firestore via RestaurantData
-      if (role == UserRole.restaurant) {
-        debugPrint("AuthProvider: Registrando dados do restaurante...");
-        final newRestaurant = Restaurant(
-          id: newUser.id,
-          imagePath: '',
-          name: restaurantName?.trim() ?? 'Restaurante de ${newUser.name}',
-          description: restaurantDescription?.trim() ?? 'Descrição Padrão',
-          stars: 0.0, distance: 0, categories: [], dishes: [],
-        );
-        // Usa try-catch para a chamada ao outro provider
-        try {
-           // Lê o provider ANTES do await (embora read seja geralmente seguro)
-           final restaurantDataProvider = context.read<RestaurantData>();
-           await restaurantDataProvider.addRestaurant(newRestaurant);
-           debugPrint("AuthProvider: Restaurante ${newRestaurant.name} adicionado via RestaurantData.");
-        } catch (e) {
-           debugPrint("AuthProvider: ERRO ao adicionar restaurante via RestaurantData: $e. Continuando registo do utilizador.");
-           // Considerar se deve desfazer a criação do utilizador Auth/Firestore aqui
-        }
-      }
-
-      // O listener _onAuthStateChanged tratará a atualização do estado interno.
-      debugPrint("AuthProvider: Registo completo para ${newUser.email}.");
-      // Não precisa chamar setLoading(false) ou notifyListeners aqui, _onAuthStateChanged fará isso.
-
-    } on fb_auth.FirebaseAuthException catch (e) {
-      _setLoading(false); // Para loading em caso de erro
-      debugPrint("AuthProvider: Erro FirebaseAuth no registo: ${e.code}");
-      _rethrowFirebaseAuthException(e, "registo"); // Lança exceção tratada
-    } catch (e, s) {
-      _setLoading(false); // Para loading
-      debugPrint("AuthProvider: Erro inesperado no registo: $e\n$s");
-      throw Exception('Ocorreu um erro inesperado durante o registo.');
-    }
-  }
-
-
-  /// Autentica um utilizador com email e senha.
-  Future<void> signInWithEmailAndPassword(String email, String password) async {
-    if (_isLoading) return;
-    _setLoading(true);
-
-    try {
-      debugPrint("AuthProvider: Tentando login com Firebase Auth para $email...");
-      await _firebaseAuth.signInWithEmailAndPassword(
-        email: email.trim(),
-        password: password.trim(),
-      );
-      // Sucesso! O listener _onAuthStateChanged será chamado.
-      debugPrint("AuthProvider: Chamada a signInWithEmailAndPassword bem-sucedida.");
-      // _isLoading será definido como false pelo _onAuthStateChanged.
-
-    } on fb_auth.FirebaseAuthException catch (e) {
-      _setLoading(false); // Para loading em caso de erro
-      debugPrint("AuthProvider: Erro FirebaseAuth no login: ${e.code}");
-      _rethrowFirebaseAuthException(e, "login"); // Lança exceção tratada
-    } catch (e, s) {
-      _setLoading(false); // Para loading
-      debugPrint("AuthProvider: Erro inesperado no login: $e\n$s");
-      throw Exception('Ocorreu um erro inesperado durante o login.');
-    }
-  }
-
-  /// Desloga o utilizador atual.
-  Future<void> logout() async {
-    debugPrint("AuthProvider: Método logout() chamado.");
-    // Permite chamar mesmo se estiver carregando, para forçar logout em caso de erro
-    // if (_isLoading && !isAuthenticated) return;
-
-    // Define isLoading ANTES da chamada async, mas notifica depois se necessário
-    bool wasLoading = _isLoading;
-    _isLoading = true;
-    if (!wasLoading) notifyListeners(); // Notifica só se não estava em loading
-
-    try {
-      await _firebaseAuth.signOut();
-      // O listener _onAuthStateChanged tratará a limpeza do estado.
-      debugPrint("AuthProvider: Firebase signOut() chamado com sucesso.");
-    } catch (e, s) {
-       debugPrint("AuthProvider: Erro durante o signOut do Firebase: $e\n$s");
-       // Força a limpeza do estado local mesmo se signOut falhar
-       _handleAuthError();
-    }
-    // _isLoading será definido como false pelo _onAuthStateChanged.
-  }
-
-  /// Atualiza a senha do utilizador logado.
+  // <<< MÉTODO PARA ALTERAR SENHA >>>
   Future<void> changePassword(String currentPassword, String newPassword) async {
      if (!isAuthenticated || _firebaseUser == null) {
         throw Exception("Utilizador não está autenticado para mudar a senha.");
@@ -279,35 +220,68 @@ class AuthProvider extends ChangeNotifier {
      _setLoading(true);
 
      try {
-        // 1. Cria a credencial
         fb_auth.AuthCredential credential = fb_auth.EmailAuthProvider.credential(
            email: _firebaseUser!.email!,
            password: currentPassword,
         );
-        // 2. Reautentica
-        debugPrint("AuthProvider: Reautenticando utilizador...");
+
+        debugPrint("AuthProvider: Reautenticando utilizador para mudança de senha...");
         await _firebaseUser!.reauthenticateWithCredential(credential);
-        debugPrint("AuthProvider: Reautenticação OK.");
-        // 3. Atualiza a senha
-        debugPrint("AuthProvider: Atualizando senha...");
+        debugPrint("AuthProvider: Reautenticação bem-sucedida.");
+
+        debugPrint("AuthProvider: Atualizando senha no Firebase Auth...");
         await _firebaseUser!.updatePassword(newPassword);
-        debugPrint("AuthProvider: Senha atualizada com sucesso.");
-        _setLoading(false); // Sucesso, para loading
+        debugPrint("AuthProvider: Senha atualizada com sucesso no Firebase Auth.");
+        _setLoading(false);
 
      } on fb_auth.FirebaseAuthException catch (e) {
-        _setLoading(false); // Para loading em caso de erro
-        debugPrint("AuthProvider: Erro FirebaseAuth ao mudar senha: ${e.code}");
-        _rethrowFirebaseAuthException(e, "alteração de senha"); // Lança exceção tratada
+        _setLoading(false);
+        debugPrint("AuthProvider: Erro de FirebaseAuth ao mudar senha: ${e.code} - ${e.message}");
+        _rethrowFirebaseAuthException(e, "alteração de senha");
      } catch (e, s) {
-        _setLoading(false); // Para loading
+        _setLoading(false);
         debugPrint("AuthProvider: Erro inesperado ao mudar senha: $e\n$s");
         throw Exception('Ocorreu um erro inesperado ao alterar a senha.');
      }
   }
 
-  // --- Helpers Internos ---
+  Future<void> deleteUserAccount(String currentPassword) async {
+     if (!isAuthenticated || _firebaseUser == null) {
+      throw Exception("Utilizador não está autenticado para excluir a conta.");
+    }
+    _setLoading(true);
+    try {
+      fb_auth.AuthCredential credential = fb_auth.EmailAuthProvider.credential(
+        email: _firebaseUser!.email!,
+        password: currentPassword,
+      );
+      await _firebaseUser!.reauthenticateWithCredential(credential);
+      
+      String? oldUserImagePath = _currentUserData?.userImagePath;
+      String userIdToDelete = _firebaseUser!.uid; // Guarda antes de deletar _firebaseUser
 
-  /// Define o estado de loading e notifica os listeners.
+      await _firebaseUser!.delete(); 
+      // O listener _onAuthStateChanged limpará _firebaseUser e _currentUserData.
+
+      // Tenta deletar a imagem do storage.
+      // Idealmente, a exclusão de dados relacionados (Firestore, Storage) seria via Cloud Functions.
+      if (oldUserImagePath != null && oldUserImagePath.startsWith('https://firebasestorage.googleapis.com')) {
+        debugPrint("AuthProvider: Tentando deletar imagem do Storage ($oldUserImagePath) após exclusão de conta Auth para $userIdToDelete.");
+        await _imageUploadService.deleteImageByUrl(oldUserImagePath);
+      }
+      // TODO: Adicionar chamada a uma Cloud Function para deletar dados do Firestore para userIdToDelete
+      debugPrint("AuthProvider: Utilizador $userIdToDelete excluído do Firebase Authentication.");
+
+    } on fb_auth.FirebaseAuthException catch (e) {
+      _setLoading(false);
+      _rethrowFirebaseAuthException(e, "exclusão de conta");
+    } catch (e) {
+      _setLoading(false);
+      throw Exception("Erro inesperado ao excluir conta: ${e.toString()}");
+    }
+    // _isLoading será false via _onAuthStateChanged
+  }
+
   void _setLoading(bool value) {
      if (_isLoading != value) {
         _isLoading = value;
@@ -315,9 +289,8 @@ class AuthProvider extends ChangeNotifier {
      }
   }
 
-  /// Converte FirebaseAuthException em Exception com mensagem mais amigável.
   void _rethrowFirebaseAuthException(fb_auth.FirebaseAuthException e, String operation) {
-     String message = 'Erro na operação de $operation: ${e.message}'; // Mensagem padrão
+     String message = 'Erro na operação de $operation: ${e.message ?? e.code}';
      if (e.code == 'weak-password') {
         message = 'A senha fornecida é muito fraca.';
      } else if (e.code == 'email-already-in-use') {
@@ -333,5 +306,4 @@ class AuthProvider extends ChangeNotifier {
      }
      throw Exception(message);
   }
-
 }

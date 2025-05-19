@@ -6,6 +6,7 @@ import 'package:myapp/ui/favorites/favorites_screen.dart';
 import 'package:myapp/ui/settings/settings_screen.dart';
 import 'package:provider/provider.dart';
 import 'package:intl/date_symbol_data_local.dart'; // <<< IMPORTAR PARA INICIALIZAÇÃO
+import 'package:firebase_app_check/firebase_app_check.dart';
 
 // Importar TODOS os seus providers
 import 'package:myapp/ui/_core/auth_provider.dart';
@@ -45,6 +46,16 @@ void main() async {
   // ThemeProvider carrega no construtor
   // BagProvider carrega no construtor (se usar SharedPreferences)
 
+// Em main.dart
+debugPrint("Main: Antes de FirebaseAppCheck.instance.activate");
+try {
+  await FirebaseAppCheck.instance.activate(
+    androidProvider: AndroidProvider.playIntegrity,
+  );
+  debugPrint("Main: Firebase App Check ativado com sucesso.");
+} catch (e) {
+  debugPrint("Main: ERRO ao ativar Firebase App Check: $e");
+}
   runApp(
     MultiProvider(
       providers: [
