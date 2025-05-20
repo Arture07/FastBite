@@ -174,7 +174,3 @@ lib/├── data/                  # Lógica de dados, providers de dados (Res
 ## Contribuições
 
 Contribuições são bem-vindas! Por favor, abra uma issue para discutir grandes mudanças ou novas funcionalidades antes de submeter um Pull Request.
-
-## Licença
-
-Este projeto é licenciado sob a Licença MIT - veja o arquivo `LICENSE.md` para detalhes (se você adicionar um).
