@@ -1,8 +1,11 @@
 // lib/ui/checkout/add_new_card_screen.dart
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart'; // Para TextInputFormatter
+import 'package:myapp/services/error_handler.dart';
+import 'package:myapp/services/input_formatters.dart';
 import 'package:myapp/ui/_core/payment_provider.dart';
 import 'package:provider/provider.dart';
-import 'package:uuid/uuid.dart'; // Para gerar IDs únicos - adicione `uuid: ^4.3.3` no pubspec.yaml
+import 'package:uuid/uuid.dart';
 
 class AddNewCardScreen extends StatefulWidget {
   final PaymentCard? cardToEdit;
@@ -22,25 +25,28 @@ class _AddNewCardScreenState extends State<AddNewCardScreen> {
   late CardType _selectedCardType;
   late String _appBarTitle;
   late String _buttonText;
+  bool _isEditing = false;
+  bool _isLoading = false;
 
   @override
   void initState() {
     super.initState();
-    // Define estado inicial baseado no cardToEdit
-    if (widget.cardToEdit != null) {
-      // Modo Edição: preenche campos
+    _isEditing = widget.cardToEdit != null;
+    if (_isEditing) {
       _appBarTitle = "Editar Cartão";
       _buttonText = "Salvar Alterações";
-      _selectedCardType = widget.cardToEdit!.cardType;
-      _nameController.text = widget.cardToEdit!.name;
-      _cardNumberController.text =
-          "**** **** **** ${widget.cardToEdit!.last4Digits}"; // Mostra só o final
-      // Não preencher validade/CVV por segurança/simplicidade na edição simulada
+      final card = widget.cardToEdit!;
+      _selectedCardType = card.cardType;
+      _nameController.text = card.name;
+      // Para edição, não mostramos o número completo, apenas os últimos 4 dígitos
+      _cardNumberController.text = "**** **** **** ${card.last4Digits}";
+      // Validade e CVV não são geralmente editáveis ou são revalidados
+      // _expiryDateController.text = card.expiryDate; // Se você armazenar a data completa
+      // _cvvController.text = card.cvv; // CVV nunca deve ser armazenado
     } else {
-      // Modo Adição
-      _appBarTitle = "Adicionar Cartão";
+      _appBarTitle = "Adicionar Novo Cartão";
       _buttonText = "Salvar Cartão";
-      _selectedCardType = CardType.credit; // Padrão Crédito ao adicionar
+      _selectedCardType = CardType.credit; // Padrão
     }
   }
 
@@ -54,69 +60,74 @@ class _AddNewCardScreenState extends State<AddNewCardScreen> {
   }
 
   void _saveCard() {
-    if (_formKey.currentState!.validate()) {
-      final paymentProvider = Provider.of<PaymentProvider>(
-        context,
-        listen: false,
-      );
-      var uuid = const Uuid();
-
-      // Lógica para obter dados do formulário (exemplo simplificado)
-      // Em modo edição, só pegamos nome e tipo, mantemos ID e last4.
-      // Em modo adição, pegamos tudo (com simulação de last4).
-      String last4 = "****";
-      if (widget.cardToEdit == null && _cardNumberController.text.length >= 4) {
-        last4 = _cardNumberController.text.substring(
-          _cardNumberController.text.length - 4,
-        );
-      } else if (widget.cardToEdit != null) {
-        last4 = widget.cardToEdit!.last4Digits;
-      }
-
-      if (widget.cardToEdit == null) {
-        // --- MODO ADIÇÃO ---
-        final newCard = PaymentCard(
-          id: uuid.v4(), // Gera novo ID
-          name:
-              _nameController.text.isNotEmpty
-                  ? _nameController.text
-                  : "Cartão Final $last4",
-          last4Digits: last4,
-          cardType: _selectedCardType,
-          brand: CardBrand.other, // Usar placeholder ou detectar bandeira
-        );
-        paymentProvider.addCard(newCard);
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Cartão adicionado! (Simulação)')),
-        );
-      } else {
-        // --- MODO EDIÇÃO ---
-        // Cria um cartão atualizado usando copyWith (se implementado no modelo) ou manualmente
-        final updatedCard = widget.cardToEdit!.copyWith(
-          name: _nameController.text,
-          cardType: _selectedCardType,
-          // Não alteramos ID, last4, brand nesta edição simulada
-        );
-        // Ou manualmente:
-        // final updatedCard = PaymentCard(
-        //    id: widget.cardToEdit!.id, // Mantém o ID original
-        //    name: _nameController.text,
-        //    last4Digits: widget.cardToEdit!.last4Digits, // Mantém last4
-        //    cardType: _selectedCardType,
-        //    brand: widget.cardToEdit!.brand, // Mantém brand
-        // );
-        paymentProvider.updateCard(updatedCard);
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(const SnackBar(content: Text('Cartão atualizado!')));
-      }
-      Navigator.pop(context); // Volta para a tela anterior
+    if (!_formKey.currentState!.validate()) {
+      return;
     }
+    if (!mounted) return;
+    setState(() => _isLoading = true);
+
+    final paymentProvider = context.read<PaymentProvider>();
+    final navigator = Navigator.of(context); // Captura antes do async
+    final scaffoldMessenger = ScaffoldMessenger.of(context);
+
+    // Simulação: Pegar os últimos 4 dígitos do número do cartão
+    String last4Digits = "0000";
+    String rawCardNumber = _cardNumberController.text.replaceAll(' ', '');
+    if (rawCardNumber.length >= 4) {
+      last4Digits = rawCardNumber.substring(rawCardNumber.length - 4);
+    }
+    
+    // Validação simples da data de validade (MM/AA)
+    String expiryDate = _expiryDateController.text;
+    if (!RegExp(r'^(0[1-9]|1[0-2])\/([0-9]{2})$').hasMatch(expiryDate)) {
+        scaffoldMessenger.showSnackBar(const SnackBar(content: Text('Data de validade inválida. Use MM/AA.'), backgroundColor: Colors.orange));
+        setState(() => _isLoading = false);
+        return;
+    }
+    // Poderia adicionar validação se a data já expirou
+
+    final cardData = PaymentCard(
+      id: widget.cardToEdit?.id ?? const Uuid().v4(),
+      name: _nameController.text.trim(),
+      last4Digits: last4Digits, // Salva apenas os últimos 4 dígitos
+      cardType: _selectedCardType,
+      brand: _getCardBrand(rawCardNumber), // Detecta a bandeira (simulado)
+      // Não salvamos número completo, CVV ou data de validade completa por segurança
+      // expiryDate: _expiryDateController.text, // Se decidir salvar
+    );
+
+    // Simula um delay de salvamento
+    Future.delayed(const Duration(milliseconds: 500), () {
+      if (!mounted) return; 
+
+      try {
+        if (_isEditing) {
+          paymentProvider.updateCard(cardData);
+          scaffoldMessenger.showSnackBar(const SnackBar(content: Text('Cartão atualizado!'), backgroundColor: Colors.green,));
+        } else {
+          paymentProvider.addCard(cardData);
+          scaffoldMessenger.showSnackBar(const SnackBar(content: Text('Cartão adicionado!'), backgroundColor: Colors.green,));
+        }
+        if (navigator.canPop()) navigator.pop();
+      } catch (e) {
+         if (mounted) ErrorHandler.handleGenericError(context, e, operation: "salvar cartão");
+      } finally {
+         if (mounted) setState(() => _isLoading = false);
+      }
+    });
+  }
+
+  // Função simulada para detectar bandeira (apenas para exibição)
+  CardBrand _getCardBrand(String cardNumber) {
+    if (cardNumber.startsWith('4')) return CardBrand.visa;
+    if (cardNumber.startsWith('5')) return CardBrand.mastercard; // Simplificado
+    // Adicionar mais lógicas se necessário
+    return CardBrand.other;
   }
 
   @override
   Widget build(BuildContext context) {
-    bool isEditing = widget.cardToEdit != null;
+    final theme = Theme.of(context);
     return Scaffold(
       appBar: AppBar(title: Text(_appBarTitle)),
       body: SingleChildScrollView(
@@ -126,125 +137,147 @@ class _AddNewCardScreenState extends State<AddNewCardScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              // --- ALERTA DE SEGURANÇA ---
-              if (!isEditing)
-                Container(
-                  padding: const EdgeInsets.all(12.0),
-                  color: Colors.red[900],
-                  child: Text(
-                    "ATENÇÃO: Em aplicativos reais, NUNCA colete ou armazene dados completos de cartão diretamente. Use SDKs seguros de gateways de pagamento (Stripe, Mercado Pago, etc.) para tokenização e conformidade PCI.",
-                    style: TextStyle(color: Colors.white),
-                    textAlign: TextAlign.center,
-                  ),
-                ),
-              if (!isEditing) const SizedBox(height: 24),
-
-              // --- SELEÇÃO DE TIPO DE CARTÃO ---
-              const Text("Tipo de Cartão:", style: TextStyle(fontSize: 16)),
-              const SizedBox(height: 8),
-              ToggleButtons(
-                isSelected: [
-                  // Lista de booleanos para indicar seleção
-                  _selectedCardType == CardType.credit,
-                  _selectedCardType == CardType.debit,
-                ],
-                onPressed: (int index) {
-                  setState(() {
-                    _selectedCardType =
-                        (index == 0) ? CardType.credit : CardType.debit;
-                  });
-                },
-                borderRadius: BorderRadius.circular(8.0),
-                selectedColor: Colors.white,
-                color: Colors.grey[400],
-                fillColor: Theme.of(context).primaryColor,
-                constraints: BoxConstraints(
-                  minHeight: 40.0,
-                  minWidth: (MediaQuery.of(context).size.width - 48) / 2,
-                ),
-                // <<< ADICIONE ESTA PARTE >>>
-                children: const <Widget>[
-                  // Widget para o botão "Crédito"
-                  Padding(
-                    padding: EdgeInsets.symmetric(horizontal: 16),
-                    child: Text('Crédito'),
-                  ),
-                  // Widget para o botão "Débito"
-                  Padding(
-                    padding: EdgeInsets.symmetric(horizontal: 16),
-                    child: Text('Débito'),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 24),
-
-              // --- Campos do Cartão ---
-              // Desabilitar campo número se estiver editando (ou mostrar só o final)
-              TextFormField(
-                controller: _cardNumberController,
-                decoration: InputDecoration(
-                  labelText:
-                      isEditing
-                          ? "Cartão (Final ${widget.cardToEdit!.last4Digits})"
-                          : "Número do Cartão (Simulado)",
-                ),
-                keyboardType: TextInputType.number,
-                enabled: !isEditing, // Desabilita em modo edição
-                validator:
-                    isEditing
-                        ? null
-                        : (value) {
-                          // Não valida em modo edição
-                          if (value == null || value.isEmpty) {
-                            return 'Campo obrigatório';
-                          }
-                          return null;
-                        },
+              // ... (Aviso sobre não coletar dados reais) ...
+              Text(
+                "ATENÇÃO: Em aplicativos reais, NUNCA colete ou armazene dados completos de cartão diretamente. Use SDKs seguros de gateways de pagamento (Stripe, Mercado Pago, etc.) para tokenização e conformidade PCI.",
+                style: TextStyle(color: theme.colorScheme.error, fontSize: 12),
+                textAlign: TextAlign.center,
               ),
               const SizedBox(height: 16),
-              // Esconder validade/CVV em modo edição (simulação)
-              if (!isEditing)
-                Row(
-                  children: [
-                    Expanded(
-                      child: TextFormField(
-                        controller: _expiryDateController,
-                        decoration: InputDecoration(
-                          labelText: "Validade (MM/AA)",
-                        ) /* ... */,
-                      ),
+
+              // Seletor de Tipo de Cartão
+              Text("Tipo de Cartão:", style: theme.textTheme.titleMedium),
+              Row(
+                children: [
+                  Expanded(
+                    child: RadioListTile<CardType>(
+                      title: const Text('Crédito'),
+                      value: CardType.credit,
+                      groupValue: _selectedCardType,
+                      onChanged: (CardType? value) {
+                        if (value != null) setState(() => _selectedCardType = value);
+                      },
                     ),
-                    const SizedBox(width: 16),
-                    Expanded(
-                      child: TextFormField(
-                        controller: _cvvController,
-                        decoration: InputDecoration(labelText: "CVV") /* ... */,
-                      ),
+                  ),
+                  Expanded(
+                    child: RadioListTile<CardType>(
+                      title: const Text('Débito'),
+                      value: CardType.debit,
+                      groupValue: _selectedCardType,
+                      onChanged: (CardType? value) {
+                        if (value != null) setState(() => _selectedCardType = value);
+                      },
                     ),
-                  ],
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
+
+              // Número do Cartão
+              TextFormField(
+                controller: _cardNumberController,
+                enabled: !_isEditing && !_isLoading, // Desabilita em modo edição ou loading
+                decoration: const InputDecoration(
+                  labelText: "Número do Cartão (Simulado)",
+                  hintText: "0000 0000 0000 0000",
+                  prefixIcon: Icon(Icons.credit_card),
                 ),
-              if (!isEditing)
-                const SizedBox(
-                  height: 16,
-                ), // Só mostra espaço se os campos acima aparecerem
+                keyboardType: TextInputType.number,
+                inputFormatters: [
+                  FilteringTextInputFormatter.digitsOnly,
+                  LengthLimitingTextInputFormatter(16), // Limita a 16 dígitos
+                  CardNumberInputFormatter(), // Formata com espaços
+                ],
+                validator: (value) {
+                  if (_isEditing) return null; // Não valida em modo edição
+                  if (value == null || value.replaceAll(' ', '').length < 13) { // Mínimo comum
+                    return 'Número do cartão inválido';
+                  }
+                  return null;
+                },
+              ),
+              const SizedBox(height: 16),
+
+              // Validade e CVV
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(
+                    child: TextFormField(
+                      controller: _expiryDateController,
+                      enabled: !_isLoading,
+                      decoration: const InputDecoration(
+                        labelText: "Validade (MM/AA)",
+                        hintText: "MM/AA",
+                        prefixIcon: Icon(Icons.calendar_today_outlined),
+                      ),
+                      keyboardType: TextInputType.number,
+                      inputFormatters: [
+                        FilteringTextInputFormatter.digitsOnly,
+                        LengthLimitingTextInputFormatter(4), // MMAA
+                        CardExpiryDateInputFormatter(), // Formata com /
+                      ],
+                      validator: (value) {
+                        if (value == null || !RegExp(r'^(0[1-9]|1[0-2])\/([0-9]{2})$').hasMatch(value)) {
+                          return 'MM/AA inválido';
+                        }
+                        // Opcional: Validar se a data não expirou
+                        return null;
+                      },
+                    ),
+                  ),
+                  const SizedBox(width: 16),
+                  Expanded(
+                    child: TextFormField(
+                      controller: _cvvController,
+                      enabled: !_isLoading,
+                      decoration: const InputDecoration(
+                        labelText: "CVV",
+                        hintText: "000",
+                        prefixIcon: Icon(Icons.lock_outline),
+                      ),
+                      keyboardType: TextInputType.number,
+                      inputFormatters: [
+                        FilteringTextInputFormatter.digitsOnly,
+                        LengthLimitingTextInputFormatter(4), // CVV pode ter 3 ou 4 dígitos
+                      ],
+                      validator: (value) {
+                        if (value == null || value.length < 3) {
+                          return 'CVV inválido';
+                        }
+                        return null;
+                      },
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
+
+              // Nome no Cartão / Apelido
               TextFormField(
                 controller: _nameController,
+                enabled: !_isLoading,
                 decoration: const InputDecoration(
-                  labelText: "Nome no Cartão / Apelido",
-                ), // Tornar mais claro
+                  labelText: "Nome no Cartão / Apelido do Cartão",
+                  prefixIcon: Icon(Icons.person_outline),
+                ),
+                textCapitalization: TextCapitalization.words,
                 validator: (value) {
-                  if (value == null || value.isEmpty) {
-                    return 'Campo obrigatório';
+                  if (value == null || value.trim().isEmpty) {
+                    return 'Nome/Apelido é obrigatório';
                   }
+                  if (value.trim().length > 50) return 'Máximo 50 caracteres';
                   return null;
                 },
               ),
               const SizedBox(height: 32),
 
-              // --- Botão Salvar ---
               ElevatedButton(
-                onPressed: _saveCard, // Chama a função separada
-                child: Text(_buttonText), // Texto dinâmico
+                onPressed: _isLoading ? null : _saveCard,
+                style: ElevatedButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 14)),
+                child: _isLoading 
+                    ? const SizedBox(width:20, height:20, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
+                    : Text(_buttonText),
               ),
             ],
           ),

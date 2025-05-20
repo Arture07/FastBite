@@ -1,14 +1,17 @@
 // lib/ui/restaurant_menu/add_edit_dish_screen.dart
-import 'dart:io'; // Para usar File
+import 'dart:io'; 
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:image_picker/image_picker.dart'; // <<< IMPORTAR IMAGE_PICKER
+import 'package:image_picker/image_picker.dart';
 import 'package:myapp/data/categories_data.dart';
 import 'package:myapp/data/restaurant_data.dart';
 import 'package:myapp/model/dish.dart';
-import 'package:myapp/services/image_upload_service.dart'; // <<< IMPORTAR SERVIÇO DE UPLOAD
+import 'package:myapp/services/image_upload_service.dart';
+import 'package:myapp/services/error_handler.dart'; // Para tratar erros
 import 'package:provider/provider.dart';
 import 'package:uuid/uuid.dart';
+import 'package:cached_network_image/cached_network_image.dart'; // Para exibir imagem da rede
 
 class AddEditDishScreen extends StatefulWidget {
   final String restaurantId;
@@ -29,8 +32,8 @@ class _AddEditDishScreenState extends State<AddEditDishScreen> {
   final _nameCtrl = TextEditingController();
   final _descCtrl = TextEditingController();
   final _priceCtrl = TextEditingController();
-  // _imagePathCtrl agora guarda a URL da imagem do Storage ou o caminho do asset
-  final _imagePathCtrl = TextEditingController(); 
+  // _imagePathCtrl não é mais usado para input direto, mas pode ser útil para debug
+  // final _imagePathCtrl = TextEditingController(); 
   
   List<String> _selectedDishCategories = [];
   final List<String> _allAvailableCategories = CategoriesData.listCategories;
@@ -38,26 +41,24 @@ class _AddEditDishScreenState extends State<AddEditDishScreen> {
   bool _isEditing = false;
   bool _isLoading = false;
 
-  // <<< NOVO: Para a imagem selecionada localmente >>>
-  File? _selectedImageFile;
-  // <<< NOVO: Instância do serviço de upload >>>
+  File? _selectedImageFile; // Para a nova imagem selecionada localmente
+  String? _currentDishImageUrl; // Para a URL da imagem existente (se houver)
   final ImageUploadService _imageUploadService = ImageUploadService();
-  String? _currentImageUrlForDisplay; // Para exibir a imagem atual ou a nova
 
   @override
   void initState() {
     super.initState();
     _isEditing = widget.dishToEdit != null;
     if (_isEditing) {
-      _nameCtrl.text = widget.dishToEdit!.name;
-      _descCtrl.text = widget.dishToEdit!.description;
-      _priceCtrl.text = (widget.dishToEdit!.price / 100).toStringAsFixed(2).replaceAll('.', ',');
-      _imagePathCtrl.text = widget.dishToEdit!.imagePath; // URL do Storage ou caminho do asset
-      _currentImageUrlForDisplay = widget.dishToEdit!.imagePath;
-      _selectedDishCategories = List<String>.from(widget.dishToEdit!.categories);
+      final dish = widget.dishToEdit!;
+      _nameCtrl.text = dish.name;
+      _descCtrl.text = dish.description;
+      _priceCtrl.text = (dish.price / 100.0).toStringAsFixed(2).replaceAll('.', ',');
+      _currentDishImageUrl = dish.imagePath; // Guarda a URL/caminho atual
+      _selectedDishCategories = List<String>.from(dish.categories);
     } else {
-      // _imagePathCtrl.text = 'assets/dishes/default_dish.png'; // Caminho padrão para asset
-      // _currentImageUrlForDisplay = 'assets/dishes/default_dish.png';
+      // Para um novo prato, você pode definir uma imagem padrão de asset se quiser
+      // _currentDishImageUrl = 'assets/dishes/default_dish.png'; 
     }
   }
 
@@ -66,70 +67,65 @@ class _AddEditDishScreenState extends State<AddEditDishScreen> {
     _nameCtrl.dispose();
     _descCtrl.dispose();
     _priceCtrl.dispose();
-    _imagePathCtrl.dispose();
+    // _imagePathCtrl.dispose();
     super.dispose();
   }
 
-  Future<void> _pickAndSetImage(ImageSource source) async {
-    final File? image = await _imageUploadService.pickImage(source);
-    if (image != null) {
-      setState(() {
-        _selectedImageFile = image;
-        _currentImageUrlForDisplay = null; // Limpa URL antiga para mostrar a nova imagem local
-      });
+  Future<void> _pickImage(ImageSource source) async {
+    if (_isLoading) return;
+    try {
+      final File? image = await _imageUploadService.pickImage(source);
+      if (image != null) {
+        setState(() {
+          _selectedImageFile = image;
+          // Opcional: se quiser que a UI mostre a imagem local imediatamente
+          // _currentDishImageUrl = null; 
+        });
+      }
+    } catch (e) {
+      if (mounted) ErrorHandler.handleGenericError(context, e, operation: "selecionar imagem para o prato");
     }
   }
 
   Future<void> _saveDish() async {
     if (!_formKey.currentState!.validate()) return;
     if (_selectedDishCategories.isEmpty) {
-      // ... (mostrar SnackBar de erro) ...
+      if (mounted) ErrorHandler.handleGenericError(context, "Selecione pelo menos uma categoria para o prato.");
       return;
     }
-
+    if (!mounted) return;
     setState(() => _isLoading = true);
-    String finalImagePath = _imagePathCtrl.text; // Mantém o caminho/URL existente por padrão
 
-    // 1. Se uma nova imagem foi selecionada, faz o upload
+    final navigator = Navigator.of(context); // Captura antes de async
+    String finalImagePath = _currentDishImageUrl ?? 'assets/dishes/default_dish.png'; // Fallback para imagem padrão
+
+    // 1. Upload da nova imagem, se selecionada
     if (_selectedImageFile != null) {
-      // Se estava editando e tinha uma imagem antiga no Storage, pode deletá-la
-      if (_isEditing && widget.dishToEdit!.imagePath.startsWith('https://firebasestorage.googleapis.com')) {
-        await _imageUploadService.deleteImageByUrl(widget.dishToEdit!.imagePath);
-      }
-      // Faz upload da nova imagem
-      // O caminho no Storage pode ser 'dishes/{restaurantId}/{dishId_ou_nomeUnico}'
-      final String storagePath = 'dish_images/${widget.restaurantId}';
-      final String? uploadedImageUrl = await _imageUploadService.uploadImage(_selectedImageFile!, storagePath);
-      
-      if (uploadedImageUrl != null) {
-        finalImagePath = uploadedImageUrl; // Usa a nova URL do Storage
-      } else {
-        // Falha no upload, decide como tratar (ex: usar imagem padrão, mostrar erro)
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Erro no upload da imagem. Usando imagem anterior/padrão.'), backgroundColor: Colors.orange),
-          );
+      try {
+        final String storagePath = 'dish_images/${widget.restaurantId}';
+        // Deleta a imagem antiga do Storage se ela existir e for uma URL do Firebase Storage
+        if (_currentDishImageUrl != null && _currentDishImageUrl!.startsWith('https://firebasestorage.googleapis.com')) {
+          await _imageUploadService.deleteImageByUrl(_currentDishImageUrl!);
         }
-        // Mantém finalImagePath como estava ou define um padrão se for um prato novo sem imagem
-        if (!_isEditing) finalImagePath = 'assets/dishes/default_dish.png';
+        // Faz upload da nova imagem. O nome do arquivo será gerado pelo serviço (UUID).
+        finalImagePath = await _imageUploadService.uploadImage(_selectedImageFile!, storagePath);
+      } on FirebaseException catch (e) {
+        if (mounted) ErrorHandler.handleFirebaseStorageError(context, e, operation: "upload da imagem do prato");
+        setState(() => _isLoading = false); return; // Para a execução se o upload falhar
+      } catch (e) {
+        if (mounted) ErrorHandler.handleGenericError(context, e, operation: "upload da imagem do prato");
+        setState(() => _isLoading = false); return; // Para a execução se o upload falhar
       }
     }
 
-
+    // 2. Conversão do preço para centavos
     int priceInCents = 0;
     try {
-      String priceText = _priceCtrl.text.trim().replaceAll(',', '.');
-      double priceDouble = double.parse(priceText);
-      priceInCents = (priceDouble * 100).round();
+      priceInCents = (double.parse(_priceCtrl.text.trim().replaceAll(',', '.')) * 100).round();
       if (priceInCents < 0) throw const FormatException("Preço não pode ser negativo.");
     } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Formato de preço inválido.'), backgroundColor: Colors.red),
-        );
-        setState(() => _isLoading = false);
-      }
-      return;
+      if (mounted) ErrorHandler.handleGenericError(context, "Formato de preço inválido.");
+      setState(() => _isLoading = false); return;
     }
 
     final restaurantData = context.read<RestaurantData>();
@@ -140,36 +136,39 @@ class _AddEditDishScreenState extends State<AddEditDishScreen> {
           name: _nameCtrl.text.trim(),
           description: _descCtrl.text.trim(),
           price: priceInCents,
-          imagePath: finalImagePath, // <<< USA A URL DO STORAGE OU CAMINHO DO ASSET
+          imagePath: finalImagePath,
           categories: _selectedDishCategories,
+          // Campos de avaliação são mantidos, pois são atualizados por outra lógica
+          averageRating: widget.dishToEdit!.averageRating,
+          ratingCount: widget.dishToEdit!.ratingCount,
         );
         await restaurantData.updateDishInRestaurant(widget.restaurantId, updatedDish);
-        // ... (SnackBar e pop) ...
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Prato atualizado com sucesso!'), backgroundColor: Colors.green,));
+        }
       } else {
         final newDish = Dish(
           id: const Uuid().v4(),
           name: _nameCtrl.text.trim(),
           description: _descCtrl.text.trim(),
           price: priceInCents,
-          imagePath: finalImagePath, // <<< USA A URL DO STORAGE OU CAMINHO DO ASSET
+          imagePath: finalImagePath,
           categories: _selectedDishCategories,
+          averageRating: 0.0, // Inicializa avaliação para novos pratos
+          ratingCount: 0,   // Inicializa contagem
         );
         await restaurantData.addDishToRestaurant(widget.restaurantId, newDish);
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Prato adicionado!')));
-          Navigator.pop(context);
+         if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Prato adicionado com sucesso!'), backgroundColor: Colors.green,));
         }
       }
+      if (mounted && navigator.canPop()) navigator.pop(); // Volta para a tela anterior
     } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Erro ao salvar prato: ${e.toString()}'), backgroundColor: Colors.red),
-        );
-      }
+      // O erro já deve ter sido lançado e tratado pelo ErrorHandler se veio do provider
+      // Mas podemos adicionar um handler genérico aqui para o caso de outras exceções
+      if (mounted) ErrorHandler.handleGenericError(context, e, operation: "salvar prato");
     } finally {
-      if (mounted) {
-        setState(() => _isLoading = false);
-      }
+      if (mounted) setState(() => _isLoading = false);
     }
   }
 
@@ -195,138 +194,66 @@ class _AddEditDishScreenState extends State<AddEditDishScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              // --- Campo Nome do Prato ---
-              TextFormField(
-                controller: _nameCtrl,
-                enabled: !_isLoading, // Desabilita no loading
-                decoration: const InputDecoration(
-                  labelText: "Nome do Prato",
-                  border: OutlineInputBorder(),
-                  prefixIcon: Icon(Icons.fastfood_outlined),
-                ),
-                validator:
-                    (v) =>
-                        (v == null || v.trim().isEmpty)
-                            ? 'Nome é obrigatório'
-                            : null,
-                textInputAction:
-                    TextInputAction.next, // Foco vai para o próximo campo
-              ),
-              const SizedBox(height: 16),
-
-              // --- Campo Descrição ---
-              TextFormField(
-                controller: _descCtrl,
-                enabled: !_isLoading,
-                decoration: const InputDecoration(
-                  labelText: "Descrição",
-                  border: OutlineInputBorder(),
-                  prefixIcon: Icon(Icons.description_outlined),
-                ),
-                validator:
-                    (v) =>
-                        (v == null || v.trim().isEmpty)
-                            ? 'Descrição é obrigatória'
-                            : null,
-                textInputAction: TextInputAction.next,
-                maxLines: 3, // Permite múltiplas linhas
-                minLines: 1,
-              ),
-              const SizedBox(height: 16),
-
-              // --- Campo Preço ---
-              TextFormField(
-                controller: _priceCtrl,
-                enabled: !_isLoading,
-                decoration: const InputDecoration(
-                  labelText: "Preço (Ex: 29,90)",
-                  border: OutlineInputBorder(),
-                  prefixIcon: Icon(Icons.attach_money),
-                ),
-                validator: (v) {
-                  // Validação de formato e valor
-                  if (v == null || v.trim().isEmpty) {
-                    return 'Preço é obrigatório';
-                  }
-                  final priceRegExp = RegExp(
-                    r'^\d+([,.]\d{1,2})?$',
-                  ); // Aceita 10 ou 10,00 ou 10.00
-                  if (!priceRegExp.hasMatch(v.trim())) {
-                    return 'Formato inválido (use 00,00)';
-                  }
-                  try {
-                    double priceDouble = double.parse(
-                      v.trim().replaceAll(',', '.'),
-                    );
-                    if (priceDouble < 0) return 'Preço não pode ser negativo';
-                  } catch (e) {
-                    return 'Número inválido';
-                  }
-                  return null; // Válido
-                },
-                keyboardType: const TextInputType.numberWithOptions(
-                  decimal: true,
-                ), // Teclado numérico
-                // Permite apenas números, vírgula e ponto
-                inputFormatters: [
-                  FilteringTextInputFormatter.allow(RegExp(r'[\d,.]')),
-                ],
-                textInputAction: TextInputAction.next,
-              ),
-              const SizedBox(height: 16),
-
-              // --- Campo Caminho da Imagem ---
-              Text("Imagem do Prato", style: theme.textTheme.titleMedium),
+              // Seletor de Imagem
+              Text("Imagem do Prato", style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w500)),
               const SizedBox(height: 8),
               Container(
-                height: 150,
+                height: 180,
                 width: double.infinity,
                 decoration: BoxDecoration(
                   border: Border.all(color: Colors.grey.shade400),
                   borderRadius: BorderRadius.circular(8),
+                  color: theme.colorScheme.surfaceVariant.withOpacity(0.3),
                 ),
                 child: _selectedImageFile != null
-                    ? Image.file(_selectedImageFile!, fit: BoxFit.cover)
-                    : (_currentImageUrlForDisplay != null && _currentImageUrlForDisplay!.isNotEmpty)
-                        ? (_currentImageUrlForDisplay!.startsWith('http')
-                            ? Image.network(_currentImageUrlForDisplay!, fit: BoxFit.cover, 
-                                errorBuilder: (ctx, err, st) => const Center(child: Icon(Icons.broken_image, size: 40)))
-                            : Image.asset('assets/${_currentImageUrlForDisplay!}', fit: BoxFit.cover,
-                                errorBuilder: (ctx, err, st) => const Center(child: Icon(Icons.image_not_supported, size: 40)))
+                    ? ClipRRect(borderRadius: BorderRadius.circular(7.0), child: Image.file(_selectedImageFile!, fit: BoxFit.cover))
+                    : (_currentDishImageUrl != null && _currentDishImageUrl!.isNotEmpty)
+                        ? ClipRRect(
+                            borderRadius: BorderRadius.circular(7.0),
+                            child: _currentDishImageUrl!.startsWith('http')
+                                ? CachedNetworkImage(
+                                    imageUrl: _currentDishImageUrl!,
+                                    fit: BoxFit.cover,
+                                    placeholder: (context, url) => const Center(child: CircularProgressIndicator()),
+                                    errorWidget: (context, url, error) => const Center(child: Icon(Icons.broken_image, size: 40, color: Colors.grey)),
+                                  )
+                                : Image.asset( // Se for um caminho de asset
+                                    _currentDishImageUrl!, // Assume que já tem 'assets/' se necessário
+                                    fit: BoxFit.cover,
+                                    errorBuilder: (ctx, err, st) => const Center(child: Icon(Icons.image_not_supported, size: 40, color: Colors.grey)),
+                                  ),
                           )
                         : const Center(child: Icon(Icons.image_outlined, size: 50, color: Colors.grey)),
               ),
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                 children: [
-                  TextButton.icon(
-                    icon: const Icon(Icons.photo_library_outlined),
-                    label: const Text("Galeria"),
-                    onPressed: () => _pickAndSetImage(ImageSource.gallery),
-                  ),
-                  TextButton.icon(
-                    icon: const Icon(Icons.camera_alt_outlined),
-                    label: const Text("Câmera"),
-                    onPressed: () => _pickAndSetImage(ImageSource.camera),
-                  ),
+                  TextButton.icon(icon: const Icon(Icons.photo_library_outlined), label: const Text("Galeria"), onPressed: _isLoading ? null : () => _pickImage(ImageSource.gallery)),
+                  TextButton.icon(icon: const Icon(Icons.camera_alt_outlined), label: const Text("Câmera"), onPressed: _isLoading ? null : () => _pickImage(ImageSource.camera)),
                 ],
               ),
+              const SizedBox(height: 20),
+              
+              // Campos do Formulário
+              TextFormField(controller: _nameCtrl, enabled: !_isLoading, decoration: const InputDecoration(labelText: "Nome do Prato", border: OutlineInputBorder(), prefixIcon: Icon(Icons.fastfood_outlined)), validator: (v) => (v == null || v.trim().isEmpty) ? 'Nome é obrigatório' : null, textInputAction: TextInputAction.next),
               const SizedBox(height: 16),
-              // --- FIM SELEÇÃO DE IMAGEM --
-              Text(
-                "Categorias do Prato (selecione uma ou mais):",
-                style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w500),
-              ),
+              TextFormField(controller: _descCtrl, enabled: !_isLoading, decoration: const InputDecoration(labelText: "Descrição", border: OutlineInputBorder(), prefixIcon: Icon(Icons.description_outlined)), validator: (v) => (v == null || v.trim().isEmpty) ? 'Descrição é obrigatória' : null, textInputAction: TextInputAction.next, maxLines: 3, minLines: 1),
+              const SizedBox(height: 16),
+              TextFormField(controller: _priceCtrl, enabled: !_isLoading, decoration: const InputDecoration(labelText: "Preço (Ex: 29,90)", border: OutlineInputBorder(), prefixIcon: Icon(Icons.attach_money)), validator: (v) { if (v == null || v.trim().isEmpty) return 'Preço é obrigatório'; final priceRegExp = RegExp(r'^\d+([,.]\d{1,2})?$'); if (!priceRegExp.hasMatch(v.trim())) return 'Formato inválido (use 00,00)'; try { double priceDouble = double.parse(v.trim().replaceAll(',', '.')); if (priceDouble < 0) return 'Preço não pode ser negativo'; } catch (e) { return 'Número inválido'; } return null; }, keyboardType: const TextInputType.numberWithOptions(decimal: true), inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[\d,.]'))], textInputAction: TextInputAction.next),
+              const SizedBox(height: 24),
+
+              // Seleção de Categorias do Prato
+              Text("Categorias do Prato:", style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w500)),
               const SizedBox(height: 8),
-              Wrap( // Permite que os chips quebrem linha
-                spacing: 8.0, // Espaço horizontal entre chips
-                runSpacing: 4.0, // Espaço vertical entre linhas de chips
+              Wrap(
+                spacing: 8.0, 
+                runSpacing: 4.0,
                 children: _allAvailableCategories.map((categoryName) {
                   final bool isSelected = _selectedDishCategories.contains(categoryName);
                   return FilterChip(
                     label: Text(categoryName),
                     selected: isSelected,
-                    onSelected: (bool selected) {
+                    onSelected: _isLoading ? null : (bool selected) {
                       setState(() {
                         if (selected) {
                           _selectedDishCategories.add(categoryName);
@@ -337,41 +264,22 @@ class _AddEditDishScreenState extends State<AddEditDishScreen> {
                     },
                     selectedColor: theme.colorScheme.primary,
                     checkmarkColor: theme.colorScheme.onPrimary,
-                    labelStyle: TextStyle(
-                      color: isSelected ? theme.colorScheme.onPrimary : theme.textTheme.bodyLarge?.color,
-                    ),
-                    backgroundColor: theme.colorScheme.surfaceVariant.withOpacity(0.5),
-                    shape: StadiumBorder(side: BorderSide(color: isSelected ? theme.colorScheme.primary : Colors.grey.shade400)),
+                    labelStyle: TextStyle(color: isSelected ? theme.colorScheme.onPrimary : theme.textTheme.bodyLarge?.color),
+                    backgroundColor: theme.chipTheme.backgroundColor ?? theme.colorScheme.surfaceVariant.withOpacity(0.5),
+                    shape: theme.chipTheme.shape as OutlinedBorder? ?? StadiumBorder(side: BorderSide(color: isSelected ? theme.colorScheme.primary : Colors.grey.shade400)),
                   );
                 }).toList(),
               ),
-              // --- FIM SELEÇÃO DE CATEGORIAS ---
+              const SizedBox(height: 32),
 
-              const SizedBox(height: 24),
-              // --- Botão Salvar ---
+              // Botão Salvar
               ElevatedButton.icon(
-                icon:
-                    _isLoading
-                        ? const SizedBox.shrink()
-                        : const Icon(Icons.save), // Esconde ícone no loading
-                label:
-                    _isLoading
-                        ? const SizedBox(
-                          width: 20,
-                          height: 20,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2,
-                            color: Colors.white,
-                          ),
-                        ) // Loading
-                        : Text(
-                          _isEditing ? "Salvar Alterações" : "Adicionar Prato",
-                        ), // Texto dinâmico
-                style: ElevatedButton.styleFrom(
-                  padding: const EdgeInsets.symmetric(vertical: 14),
-                ),
-                onPressed:
-                    _isLoading ? null : _saveDish, // Chama a função de salvar
+                icon: _isLoading ? const SizedBox.shrink() : const Icon(Icons.save),
+                label: _isLoading
+                    ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                    : Text(_isEditing ? "Salvar Alterações" : "Adicionar Prato"),
+                style: ElevatedButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 14)),
+                onPressed: _isLoading ? null : _saveDish,
               ),
             ],
           ),
